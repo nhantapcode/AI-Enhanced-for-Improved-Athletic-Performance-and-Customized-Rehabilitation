@@ -1,0 +1,14 @@
+data_loader:
+  num_workers: 4
+  batch_size: 32
+
+optimizer:
+  lr: 0.001
+  weight_decay: 5e-4
+  momentum: 0.9
+
+training:
+  num_epochs: 3
+  batch_size: 32
+  checkpoint_path: "checkpoint.pth"
+  
