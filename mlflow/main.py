@@ -1,16 +1,20 @@
+import os
+import sys
+import yaml
 import torch
+import mlflow
 import torchvision
-import torchvision.transforms as transforms
-from model import ImprovedNet
-import torch.optim as optim
 import torch.nn as nn
 from trainer import Trainer
-import sys
-from utils import create_experiment
-import mlflow
+import torch.optim as optim
+from model import ImprovedNet
 from torchinfo import summary
-import os
-import yaml
+from utils import create_experiment
+from mlflow.models import infer_signature
+import torchvision.transforms as transforms
+from visualize import plot_confusion_matrix
+from sklearn.metrics import confusion_matrix
+
 
 def load_params_from_yaml(file_path):
     with open(file_path, 'r') as f:
@@ -77,6 +81,12 @@ def main():
             "loss_function": criterion.__class__.__name__,
             "optimizer": optimizer.__class__.__name__,
         }
+
+        sample_inputs, _ = next(iter(trainloader))
+        X = sample_inputs.to(device)
+        signature = infer_signature(X.cpu().numpy(), model(X).detach().cpu().numpy())
+
+
         mlflow.log_params(params)
         with open("model_summary.txt", "w", encoding="utf-8") as f:
             f.write(str(summary(model)))
@@ -85,7 +95,13 @@ def main():
     
         try:
             trainer.fit(trainloader, validloader, epochs=num_epochs)
-            mlflow.pytorch.log_model(model, "models")
+            cm = confusion_matrix(trainer.all_labels, trainer.all_preds) #note về tên class mình chỉnh cần đúng hoặc sai thôi Sẽ thảo luận sau.
+            plot_confusion_matrix(cm, trainset)
+
+            # Log confusion matrix vào MLflow
+            mlflow.log_artifact("confusion_matrix.png")
+
+            mlflow.pytorch.log_model(model, "models",signature=signature)
         except KeyboardInterrupt:
             sys.exit()
 

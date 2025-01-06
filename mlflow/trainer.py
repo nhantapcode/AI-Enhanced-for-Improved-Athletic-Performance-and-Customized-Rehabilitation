@@ -16,6 +16,8 @@ class Trainer:
             self.device = device
         
         self.best_acc = 0
+        self.all_preds = []
+        self.all_labels = []
         self.cache = {
             'train_loss': [],
             'train_acc': [],
@@ -23,6 +25,7 @@ class Trainer:
             'valid_acc': [],
             'lr': []
         }
+        
         
 
     def save_checkpoint(self,path):
@@ -47,6 +50,7 @@ class Trainer:
     
 
     def compute_metrics(self, preds, labels):
+
         accuracy = sum([1 for i, j in zip(preds, labels) if i == j]) / len(labels)
         precision = metrics.precision_score(labels, preds, average='micro')
         recall = metrics.recall_score(labels, preds, average='micro')
@@ -59,10 +63,9 @@ class Trainer:
             'f1': round(f1, 7),
         }
 
-    
-        
 
     def forward(self,dataloader, fw_model='train'):
+        
         if fw_model == 'train':
                 self.model.train()
         else:
@@ -81,6 +84,8 @@ class Trainer:
                 loss = self.criterion(outputs, labels)
 
                 preds = outputs.round()
+                self.all_preds.extend(preds.softmax(dim=-1).argmax(dim=-1).tolist())
+                self.all_labels.extend(labels.tolist())
 
                 if fw_model == 'train':
                     loss.backward()
@@ -103,14 +108,16 @@ class Trainer:
             "recall": round(sum(acc[2]) / len(acc[2]), 7),
             "f1": round(sum(acc[3]) / len(acc[3]), 7)
         }
-        # acc = self.compute_metrics(cache["predicts"], cache["labels"])
+
         self.cache[f"{fw_model}_loss"].append(loss)
         self.cache[f"{fw_model}_acc"].append(acc)
     
 
     def fit(self, train_loader, valid_loader=None, epochs=2,checkpoint="checkpoint.pth"):
+
         print(f"Running on: {torch.cuda.get_device_name(torch.cuda.current_device())}")
         print(f"Total update step: {len(train_loader) * epochs}")
+
 
         for epoch in range(1, epochs+1):
             start_time = time.time()
@@ -127,13 +134,10 @@ class Trainer:
                 for metric_name, metric_value in train_acc.items():
                     mlflow.log_metric(f"train_{metric_name}", metric_value, step=epoch)
 
-
                 train_acc = [str(k) + ": " + str(v) for k, v in self.cache["train_acc"][-1].items()]
                 train_acc = " - ".join(train_acc)
-                
-
-
                 logs.append(f"\t=> Train epoch: loss: {train_loss} - {train_acc}")
+
             except KeyboardInterrupt:
                 sys.exit()
 
