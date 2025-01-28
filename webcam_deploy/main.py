@@ -1,119 +1,89 @@
-import tensorflow as tf
-import numpy as np
-import matplotlib.pyplot as plt
-import cv2
-
-KEYPOINT_EDGE_INDS_TO_COLOR = {
-    (0, 1): 'm',
-    (0, 2): 'c',
-    (1, 3): 'm',
-    (2, 4): 'c',
-    (0, 5): 'm',
-    (0, 6): 'c',
-    (5, 7): 'm',
-    (7, 9): 'm',
-    (6, 8): 'c',
-    (8, 10): 'c',
-    (5, 6): 'y',
-    (5, 11): 'm',
-    (6, 12): 'c',
-    (11, 12): 'y',
-    (11, 13): 'm',
-    (13, 15): 'm',
-    (12, 14): 'c',
-    (14, 16): 'c'
-}
-
-
-def prediction(frame):
-    """
-    Parameters:
-    frame: an image frame from the webcam
-
-    Output:
-    keypoints_with_scores: a list of keypoints with their corresponding scores have 4 dimensions (1, 1, 17, 3)
-
-    Example with right eye keypoints:
-    [0.4741213, 0.42508835, 0.75313896] :
-    x = 0.4741213: The x-coordinate is approximately 47.4% of the image's width from the left.
-    y = 0.42508835: The y-coordinate is approximately 42.5% of the image's height from the top.
-    score = 0.75313896: Confidence score of 0.753, indicating high confidence in this keypoint.
-    """
-
-    #kich thuoc cam hien co (480, 640, 3)
-
-    img = frame.copy()
-    img = tf.image.resize_with_pad(np.expand_dims(img, axis=0), 192, 192) #(1,480,640,3) -> (1,192,192,3)
-    input_image = tf.cast(img, dtype=tf.float32)
-
-    # load the TFLite model
-    interpreter = tf.lite.Interpreter(model_path=r"single_pose.tflite")
-    interpreter.allocate_tensors()
-
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-
-
-
-    interpreter.set_tensor(input_details[0]['index'], input_image.numpy())
-    interpreter.invoke()
-    keypoints_with_scores =interpreter.get_tensor(output_details[0]['index']) #17 keypoints start with index 0 (in the order of: [nose, left eye, right eye, left ear, right ear, left shoulder, right shoulder, left elbow, right elbow, left wrist, right wrist, left hip, right hip, left knee, right knee, left ankle, right ankle])
-    
-    return keypoints_with_scores
-
-def draw_keypoints(frame, keypoints, confidence_threshold):
-    x, y , c = frame.shape
-
-
-    shaped = np.squeeze(np.multiply(keypoints, [x, y, 1]))
-
-    for keypoints in shaped:
-        ky, kx, kp_conf = keypoints
-
-        if (kp_conf > confidence_threshold):
-            cv2.circle(frame, (int(kx), int(ky)), 4, (0, 255, 0), -1)
-
-def draw_connections(frame, keypoints, edges, confidence_threshold):
-    y, x, c = frame.shape
-
-    shaped = np.squeeze(np.multiply(keypoints, [y, x, 1]))
-
-    for edge, color in edges.items():
-        p1, p2 = edge
-
-        y1, x1, c1 = shaped[p1]
-        y2, x2, c2 = shaped[p2]
-
-        if (c1 > confidence_threshold) and (c2 > confidence_threshold):
-            cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255,0,0), 2)
-
-
+import os
+import sys
+import torch
+import mlflow
+import torch.nn as nn
+from trainer import Trainer
+from model import SimpleCNN
+from utils import build_transforms
+from utils import create_experiment
+from dataloader import KaggleDataset
+from mlflow.models import infer_signature
+from torch.utils.data import DataLoader, random_split
+from visualize import plot_confusion_matrix
+from torchinfo import summary
+from sklearn.metrics import confusion_matrix
 
 def main():
-    # Open the webcam
-    cap = cv2.VideoCapture(0)
+    image_dirs = {
+        "barbell_biceps_curl": "data/barbell_biceps_curl/image",
+        "hammer_curl": "data/hammer_curl/image"
+    }
+    transform = build_transforms(is_train=True)
+    dataset = KaggleDataset(image_dirs=image_dirs,transform=transform)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if not cap.isOpened():
-        print("Error")
-        return
     
-    while True:
-        ret, frame = cap.read()
+    # Chia tập train và valid (80% train, 20% valid)
+    train_size = int(0.8 * len(dataset))
+    valid_size = len(dataset) - train_size
+    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
 
-        keypoints_with_scores = prediction(frame)
+    # Tạo DataLoader
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False)
+
+    # Tạo model
+    model = SimpleCNN()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    trainer = Trainer(model, criterion,optimizer, scheduler=None)
+
+    checkpoint_path = "./checkpoint/checkpoint.pt"
+    exp_id = create_experiment(
+        name="TheSis25_Experiment",
+        artifact_location="TheSis25_Artifact",
+        tags={"env": "dev", "version": "1.0.0"}
+    )
+
+    if os.path.exists(checkpoint_path):
+        print("[+] Found checkpoint. Loading model...")
+        trainer.load_checkpoint(checkpoint_path)
+
+    with mlflow.start_run(run_name="Pytorch_test", experiment_id=exp_id,log_system_metrics=True) as run:
+        params = {
+            "epochs": 5,
+            "learning_rate": 0.001,
+            "batch_size": 32,
+            "loss_function": criterion.__class__.__name__,
+            "optimizer": optimizer.__class__.__name__,
+        }
+
+        sample_inputs, _ = next(iter(train_loader))
+        X = sample_inputs.to(device)
+        signature = infer_signature(X.cpu().numpy(), model(X).detach().cpu().numpy())
+
+
+        mlflow.log_params(params)
+        with open("model_summary.txt", "w", encoding="utf-8") as f:
+            f.write(str(summary(model)))
+        mlflow.log_artifact("model_summary.txt")
         
-        
-        draw_connections(frame, keypoints_with_scores,KEYPOINT_EDGE_INDS_TO_COLOR, confidence_threshold=0.4)
-        draw_keypoints(frame, keypoints_with_scores, confidence_threshold=0.4)
+    
+        try:
+            trainer.fit(train_loader, valid_loader, epochs=5)
+            # cm = confusion_matrix(trainer.all_labels, trainer.all_preds) #note về tên class mình chỉnh cần đúng hoặc sai thôi Sẽ thảo luận sau.
+            # plot_confusion_matrix(cm, dataset)
 
-        cv2.imshow('MoveNet Lightning', frame)
+            # # Log confusion matrix vào MLflow
+            # mlflow.log_artifact("confusion_matrix.png")
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            mlflow.pytorch.log_model(model, "models",signature=signature)
+        except KeyboardInterrupt:
+            sys.exit()
 
-    # Release the webcam and destroy all OpenCV windows
-    cap.release()
-    cv2.destroyAllWindows()
+
+
 
 if __name__ == "__main__":
     main()
